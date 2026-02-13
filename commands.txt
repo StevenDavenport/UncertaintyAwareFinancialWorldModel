@@ -1,0 +1,105 @@
+# Prepare data (already done once; rerun if needed)
+python -m dreamerv3.market.prepare_data \
+  --input_csv data/qqq_5m.csv \
+  --outdir data/market/qqq_5m \
+  --instrument QQQ \
+  --episode_length 256 \
+  --stride 256 \
+  --train_end 2026-01-10T00:00:00 \
+  --val_end 2026-02-01T00:00:00
+
+# Download a liquid ticker universe from yfinance (5m, last 60d)
+python -m dreamerv3.market.download_universe \
+  --universe sp100 \
+  --outdir data \
+  --interval 5m \
+  --period 60d \
+  --max_tickers 120 \
+  --skip_existing
+
+# Prepare multi-ticker universe dataset (same pipeline, combined episodes)
+python -m dreamerv3.market.prepare_universe \
+  --input_dir data \
+  --tickers QQQ,SPY,AAPL,MSFT,AMZN,NVDA,META,GOOGL,TSLA,AMD \
+  --csv_pattern '{ticker}_5m.csv' \
+  --outdir data/market/universe_5m \
+  --episode_length 256 \
+  --stride 256 \
+  --train_end 2026-01-10T00:00:00 \
+  --val_end 2026-02-01T00:00:00
+
+# Train tiny ensemble on CPU (recommended if CUDA is not working)
+python -m dreamerv3.market.train_ensemble \
+  --configs market_tiny \
+  --seeds 0,1,2 \
+  --logroot ~/logdir/finwm/qqq_tiny \
+  --extra_flags --jax.platform cpu
+
+# Train tiny ensemble on GPU (if CUDA backend works)
+python -m dreamerv3.market.train_ensemble \
+  --configs market_tiny \
+  --seeds 0,1,2 \
+  --logroot ~/logdir/finwm/qqq_tiny
+
+# Evaluate ensemble (for the tiny run that completed: qqq_tiny/seed_0..2)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/qqq_tiny/seed_0 ~/logdir/finwm/qqq_tiny/seed_1 ~/logdir/finwm/qqq_tiny/seed_2 \
+  --dataset_dir data/market/qqq_5m \
+  --split test \
+  --horizon 12 \
+  --samples 64 \
+  --epsilon 0.0005 \
+  --cost_buffer 0.0002 \
+  --p_min 0.70 \
+  --disagree_max 0.08 \
+  --var_max 0.0004 \
+  --outdir ~/logdir/finwm/qqq_tiny/eval_h12
+
+# Sweep thresholds over saved predictions (relaxed grid for tiny model)
+python -m dreamerv3.market.sweep_thresholds \
+  --predictions_csv ~/logdir/finwm/qqq_tiny/eval_h12/predictions.csv \
+  --outdir ~/logdir/finwm/qqq_tiny/eval_h12/sweep_relaxed \
+  --p_values 0.35,0.38,0.40,0.42,0.45,0.48,0.50,0.52,0.54 \
+  --disagree_values 0.06,0.08,0.10,0.12,0.15,0.18,0.22 \
+  --var_values 0.24,0.27,0.30,0.33,0.36,0.40,0.45 \
+  --min_coverage 0.01
+
+# Re-run eval with a balanced tiny-model gate (non-zero coverage observed)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/qqq_tiny/seed_0 ~/logdir/finwm/qqq_tiny/seed_1 ~/logdir/finwm/qqq_tiny/seed_2 \
+  --dataset_dir data/market/qqq_5m \
+  --split test \
+  --horizon 12 \
+  --samples 64 \
+  --epsilon 0.0005 \
+  --cost_buffer 0.0002 \
+  --p_min 0.48 \
+  --disagree_max 0.12 \
+  --var_max 0.40 \
+  --outdir ~/logdir/finwm/qqq_tiny/eval_h12_balanced
+
+# Prepare universe dataset using exactly the tickers that downloaded successfully
+python -m dreamerv3.market.prepare_universe \
+  --input_dir data \
+  --tickers "$(python - <<'PY'
+import json, pathlib
+r = json.loads(pathlib.Path('data/universe_sp100_download_report.json').read_text())
+print(','.join(r['success']))
+PY
+)" \
+  --csv_pattern '{ticker}_5m.csv' \
+  --outdir data/market/universe_5m \
+  --episode_length 256 \
+  --stride 256 \
+  --train_end 2026-01-10T00:00:00 \
+  --val_end 2026-02-01T00:00:00 \
+  --strict
+
+# Train tiny ensemble on universe dataset (CPU)
+python -m dreamerv3.market.train_ensemble \
+  --configs market_tiny \
+  --seeds 0,1,2,3,4 \
+  --logroot ~/logdir/finwm/universe_tiny \
+  --env.market.dataset_dir data/market/universe_5m \
+  --jax.platform cpu \
+  --jax.prealloc False

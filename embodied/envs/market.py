@@ -34,7 +34,7 @@ class Market(embodied.Env):
     self.feat = payload['feat'].astype(np.float32)
     self.ret_1 = payload['ret_1'].astype(np.float32)
     self.timestamp_ns = payload['timestamp_ns'].astype(np.int64)
-    self.close = payload['close'].astype(np.float32) if 'close' in payload else None
+    self.close_px = payload['close'].astype(np.float32) if 'close' in payload else None
 
     if self.feat.ndim != 3:
       raise ValueError(f'Expected feat shape [episodes, length, feat_dim], got {self.feat.shape}')
@@ -65,7 +65,7 @@ class Market(embodied.Env):
         'is_terminal': elements.Space(bool),
         'log/timestamp_ns': elements.Space(np.int64),
     }
-    if self.close is not None:
+    if self.close_px is not None:
       spaces['log/close'] = elements.Space(np.float32)
     return spaces
 
@@ -111,6 +111,6 @@ class Market(embodied.Env):
         'is_terminal': bool(is_terminal),
         'log/timestamp_ns': np.int64(self.timestamp_ns[self.ep, self.t]),
     }
-    if self.close is not None:
-      obs['log/close'] = np.float32(self.close[self.ep, self.t])
+    if self.close_px is not None:
+      obs['log/close'] = np.float32(self.close_px[self.ep, self.t])
     return obs

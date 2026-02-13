@@ -70,7 +70,14 @@ def _build_agent(logdir: Path, args: argparse.Namespace):
   config = elements.Config(cfg)
   agent = mainlib.make_agent(config)
 
-  ckpt_path = logdir / 'ckpt'
+  ckpt_root = logdir / 'ckpt'
+  latest_file = ckpt_root / 'latest'
+  if not latest_file.exists():
+    raise FileNotFoundError(f'Missing checkpoint pointer file: {latest_file}')
+  ckpt_name = latest_file.read_text().strip()
+  ckpt_path = ckpt_root / ckpt_name
+  if not ckpt_path.exists():
+    raise FileNotFoundError(f'Checkpoint snapshot does not exist: {ckpt_path}')
   cp = elements.Checkpoint()
   cp.agent = agent
   cp.load(str(ckpt_path), keys=['agent'])

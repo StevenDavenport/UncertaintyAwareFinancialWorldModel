@@ -37,7 +37,10 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument('--python', default=sys.executable)
   parser.add_argument('--dry_run', action='store_true')
   parser.add_argument('--extra_flags', nargs='*', default=[])
-  return parser.parse_args()
+  # Forward any unknown args (for example --jax.platform cpu) to dreamerv3/main.py.
+  args, unknown = parser.parse_known_args()
+  args.extra_flags = list(args.extra_flags) + list(unknown)
+  return args
 
 
 def main() -> None:

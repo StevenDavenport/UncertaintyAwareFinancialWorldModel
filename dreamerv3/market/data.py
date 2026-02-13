@@ -248,3 +248,100 @@ def prepare_market_dataset(
       split: values['episodes']
       for split, values in summary['splits'].items()
   }
+
+
+def _concat_episode_dicts(chunks: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+  if not chunks:
+    raise ValueError('Expected at least one episode payload to concatenate.')
+  keys = set(chunks[0].keys())
+  for payload in chunks[1:]:
+    if set(payload.keys()) != keys:
+      raise ValueError('Mismatched episode payload keys across instruments.')
+  out = {}
+  for key in sorted(keys):
+    arrays = [p[key] for p in chunks]
+    out[key] = np.concatenate(arrays, axis=0)
+  return out
+
+
+def prepare_market_universe_dataset(
+    inputs: list[tuple[str, str]],
+    outdir: str,
+    episode_length: int,
+    stride: int,
+    train_end: str,
+    val_end: str,
+    vol_window: int = 48,
+    columns: ColumnNames = ColumnNames(),
+    skip_invalid: bool = True,
+) -> dict[str, int]:
+  if not inputs:
+    raise ValueError('Expected at least one (instrument, csv_path) input.')
+
+  outpath = Path(outdir)
+  collected = {name: [] for name in ('train', 'val', 'test')}
+  per_instrument = {}
+  skipped = {}
+
+  for instrument, input_csv in inputs:
+    try:
+      raw = load_ohlcv_csv(input_csv, columns)
+      feat = build_features(raw, vol_window=vol_window)
+      splits = split_by_time(feat, train_end=train_end, val_end=val_end)
+      per_instrument[instrument] = {
+          'input_csv': str(input_csv),
+          'splits': {},
+      }
+      for split, arrays in splits.items():
+        ep = chunk_episodes(arrays, episode_length=episode_length, stride=stride)
+        collected[split].append(ep)
+        per_instrument[instrument]['splits'][split] = {
+            'rows': int(len(arrays['timestamp_ns'])),
+            'episodes': int(ep['feat'].shape[0]),
+            'episode_length': int(ep['feat'].shape[1]),
+            'feature_dim': int(ep['feat'].shape[2]),
+        }
+    except Exception:
+      if skip_invalid:
+        skipped[instrument] = str(input_csv)
+        continue
+      raise
+
+  for split in ('train', 'val', 'test'):
+    if not collected[split]:
+      msg = f'No valid instruments produced split: {split}.'
+      if skipped:
+        msg += f' Skipped {len(skipped)} instruments: {sorted(skipped.keys())}'
+      raise ValueError(msg)
+
+  summary = {
+      'instrument': 'UNIVERSE',
+      'inputs': [{ins: path} for ins, path in inputs],
+      'episode_length': int(episode_length),
+      'stride': int(stride),
+      'train_end': train_end,
+      'val_end': val_end,
+      'vol_window': int(vol_window),
+      'skip_invalid': bool(skip_invalid),
+      'valid_instruments': sorted(per_instrument.keys()),
+      'num_instruments': int(len(per_instrument)),
+      'skipped_instruments': skipped,
+      'per_instrument': per_instrument,
+      'splits': {},
+  }
+
+  for split in ('train', 'val', 'test'):
+    merged = _concat_episode_dicts(collected[split])
+    save_split_npz(outpath / f'{split}.npz', merged)
+    summary['splits'][split] = {
+        'rows': int(sum(per_instrument[i]['splits'][split]['rows'] for i in per_instrument)),
+        'episodes': int(merged['feat'].shape[0]),
+        'episode_length': int(merged['feat'].shape[1]),
+        'feature_dim': int(merged['feat'].shape[2]),
+    }
+
+  (outpath / 'meta.json').write_text(json.dumps(summary, indent=2))
+  return {
+      split: values['episodes']
+      for split, values in summary['splits'].items()
+  }

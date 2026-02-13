@@ -1,123 +1,172 @@
-# Mastering Diverse Domains through World Models
+# Uncertainty-Aware Financial World Model
 
-A reimplementation of [DreamerV3][paper], a scalable and general reinforcement
-learning algorithm that masters a wide range of applications with fixed
-hyperparameters.
+This repository is a financial forecasting side project built on top of the DreamerV3 codebase.
 
-![DreamerV3 Tasks](https://user-images.githubusercontent.com/2111293/217647148-cbc522e2-61ad-4553-8e14-1ecdc8d9438b.gif)
+The core idea is not to learn a trading policy.  
+It is to train a world model and use its uncertainty to gate decisions:
 
-If you find this code useful, please reference in your paper:
+- `green` when confidence is high
+- `abstain` otherwise
 
+## Project Status
+
+Implemented:
+
+- Market data pipeline for 5-minute OHLCV bars with stationary features
+- Dreamer-compatible market environment with zero actions
+- Ensemble training launcher (multi-seed)
+- Posterior Monte Carlo rollout inference
+- Abstention gate using:
+  - ensemble mean probability (`p_mean`)
+  - ensemble disagreement (`std p_hat`)
+  - rollout variance (`var_mean`)
+- Evaluation suite with metrics, CSV/JSON artefacts, and sanity plot
+- Threshold sweep utility
+- Universe downloader utility (Yahoo Finance, 5m/60d)
+
+## Architecture
+
+DreamerV3 world model is reused nearly unchanged:
+
+- RSSM remains action-conditioned
+- actions are forced to zeros (`agent.zero_actions=True`)
+- reward loss can be disabled (`agent.use_reward_loss=False`)
+- market treated as exogenous sequence modeling
+
+## Data Format
+
+Prepared splits (`train.npz`, `val.npz`, `test.npz`) contain:
+
+- `feat`: `[episodes, length, 6]`
+- `ret_1`: `[episodes, length, 1]`
+- `timestamp_ns`: `[episodes, length]`
+- `close`: `[episodes, length]`
+
+Feature vector:
+
+1. 1-step log return
+2. candle body ratio
+3. log(high/low)
+4. range ratio
+5. rolling realized volatility
+6. rolling log-volume z-score
+
+## Preliminary Results (as of February 13, 2026)
+
+These are early prototype results and not leak-proof production benchmarks.
+
+Single-ticker run (`QQQ`, tiny model, 3-seed ensemble), test-tuned gate:
+
+- precision: `61.5%`
+- coverage: `5.3%`
+- recall: `8.1%`
+
+Leakage-corrected protocol (`val` tune -> locked `test`) showed overfit:
+
+- locked test precision dropped near base rate (~`40%`)
+
+Universe run (subset eval for fast sweep on CPU):
+
+- dataset: `101` tickers
+- episodes: `train=1010`, `val=404`, `test=202`
+- quick eval (3 seeds, `samples=8`, `max_episodes=30`):
+  - baseline gate precision: `46.3%`, coverage: `21.0%`
+  - best precision-first sweep point: `53.0%` precision at `1.13%` coverage
+
+Takeaway: gating behavior works; coverage/precision tradeoff is controllable; more data depth is still needed.
+
+## Quickstart
+
+### 1) Download liquid universe data (Yahoo 5m, last 60d)
+
+```bash
+python -m dreamerv3.market.download_universe \
+  --universe sp100 \
+  --outdir data \
+  --interval 5m \
+  --period 60d \
+  --max_tickers 120 \
+  --skip_existing
 ```
-@article{hafner2025dreamerv3,
-  title={Mastering diverse control tasks through world models},
-  author={Hafner, Danijar and Pasukonis, Jurgis and Ba, Jimmy and Lillicrap, Timothy},
-  journal={Nature},
-  pages={1--7},
-  year={2025},
-  publisher={Nature Publishing Group}
-}
+
+### 2) Build universe dataset
+
+```bash
+python -m dreamerv3.market.prepare_universe \
+  --input_dir data \
+  --tickers "$(python - <<'PY'
+import json, pathlib
+r = json.loads(pathlib.Path('data/universe_sp100_download_report.json').read_text())
+print(','.join(r['success']))
+PY
+)" \
+  --csv_pattern '{ticker}_5m.csv' \
+  --outdir data/market/universe_5m \
+  --episode_length 256 \
+  --stride 256 \
+  --train_end 2026-01-10T00:00:00 \
+  --val_end 2026-02-01T00:00:00 \
+  --strict
 ```
 
-To learn more:
+### 3) Train ensemble (tiny config, CPU)
 
-- [Research paper][paper]
-- [Project website][website]
-- [Twitter summary][tweet]
-
-## DreamerV3
-
-DreamerV3 learns a world model from experiences and uses it to train an actor
-critic policy from imagined trajectories. The world model encodes sensory
-inputs into categorical representations and predicts future representations and
-rewards given actions.
-
-![DreamerV3 Method Diagram](https://user-images.githubusercontent.com/2111293/217355673-4abc0ce5-1a4b-4366-a08d-64754289d659.png)
-
-DreamerV3 masters a wide range of domains with a fixed set of hyperparameters,
-outperforming specialized methods. Removing the need for tuning reduces the
-amount of expert knowledge and computational resources needed to apply
-reinforcement learning.
-
-![DreamerV3 Benchmark Scores](https://github.com/danijar/dreamerv3/assets/2111293/0fe8f1cf-6970-41ea-9efc-e2e2477e7861)
-
-Due to its robustness, DreamerV3 shows favorable scaling properties. Notably,
-using larger models consistently increases not only its final performance but
-also its data-efficiency. Increasing the number of gradient steps further
-increases data efficiency.
-
-![DreamerV3 Scaling Behavior](https://user-images.githubusercontent.com/2111293/217356063-0cf06b17-89f0-4d5f-85a9-b583438c98dd.png)
-
-# Instructions
-
-The code has been tested on Linux and Mac and requires Python 3.11+.
-
-## Docker
-
-You can either use the provided `Dockerfile` that contains instructions or
-follow the manual instructions below.
-
-## Manual
-
-Install [JAX][jax] and then the other dependencies:
-
-```sh
-pip install -U -r requirements.txt
+```bash
+python -m dreamerv3.market.train_ensemble \
+  --configs market_tiny \
+  --seeds 0,1,2,3,4 \
+  --logroot ~/logdir/finwm/universe_tiny \
+  --env.market.dataset_dir data/market/universe_5m \
+  --jax.platform cpu \
+  --jax.prealloc False
 ```
 
-Training script:
+### 4) Evaluate ensemble
 
-```sh
-python dreamerv3/main.py \
-  --logdir ~/logdir/dreamer/{timestamp} \
-  --configs crafter \
-  --run.train_ratio 32
+```bash
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/universe_tiny/seed_0 ~/logdir/finwm/universe_tiny/seed_1 ~/logdir/finwm/universe_tiny/seed_2 \
+  --dataset_dir data/market/universe_5m \
+  --split test \
+  --horizon 12 \
+  --samples 8 \
+  --epsilon 0.0005 \
+  --cost_buffer 0.0002 \
+  --p_min 0.50 \
+  --disagree_max 0.12 \
+  --var_max 0.40 \
+  --max_episodes 30 \
+  --outdir ~/logdir/finwm/universe_tiny/eval_h12_test_quick30
 ```
 
-To reproduce results, train on the desired task using the corresponding config,
-such as `--configs atari --task atari_pong`.
+### 5) Sweep thresholds
 
-View results:
-
-```sh
-pip install -U scope
-python -m scope.viewer --basedir ~/logdir --port 8000
+```bash
+python -m dreamerv3.market.sweep_thresholds \
+  --predictions_csv ~/logdir/finwm/universe_tiny/eval_h12_test_quick30/predictions.csv \
+  --outdir ~/logdir/finwm/universe_tiny/eval_h12_test_quick30/sweep_relaxed \
+  --p_values 0.35,0.40,0.45,0.50,0.55,0.60,0.65 \
+  --disagree_values 0.04,0.06,0.08,0.10,0.12,0.15,0.20 \
+  --var_values 0.10,0.15,0.20,0.25,0.30,0.40,0.60 \
+  --min_coverage 0.01
 ```
 
-Scalar metrics are also writting as JSONL files.
+## Important Notes
 
-# Tips
+- Yahoo Finance 5-minute history is limited to the most recent ~60 days.
+- For serious validation and lower overfit risk, migrate to a provider with deeper intraday history.
+- Always evaluate with strict protocol:
+  - tune thresholds on `val`
+  - report once on locked `test`
 
-- All config options are listed in `dreamerv3/configs.yaml` and you can
-  override them as flags from the command line.
-- The `debug` config block reduces the network size, batch size, duration
-  between logs, and so on for fast debugging (but does not learn a good model).
-- By default, the code tries to run on GPU. You can switch to CPU or TPU using
-  the `--jax.platform cpu` flag.
-- You can use multiple config blocks that will override defaults in the
-  order they are specified, for example `--configs crafter size50m`.
-- By default, metrics are printed to the terminal, appended to a JSON lines
-  file, and written as Scope summaries. Other outputs like WandB and
-  TensorBoard can be enabled in the training script.
-- If you get a `Too many leaves for PyTreeDef` error, it means you're
-  reloading a checkpoint that is not compatible with the current config. This
-  often happens when reusing an old logdir by accident.
-- If you are getting CUDA errors, scroll up because the cause is often just an
-  error that happened earlier, such as out of memory or incompatible JAX and
-  CUDA versions. Try `--batch_size 1` to rule out an out of memory error.
-- Many environments are included, some of which require installing additional
-  packages. See the `Dockerfile` for reference.
-- To continue stopped training runs, simply run the same command line again and
-  make sure that the `--logdir` points to the same directory.
+## Key Project Files
 
-# Disclaimer
-
-This repository contains a reimplementation of DreamerV3 based on the open
-source DreamerV2 code base. It is unrelated to Google or DeepMind. The
-implementation has been tested to reproduce the official results on a range of
-environments.
-
-[jax]: https://github.com/google/jax#pip-installation-gpu-cuda
-[paper]: https://arxiv.org/pdf/2301.04104
-[website]: https://danijar.com/dreamerv3
-[tweet]: https://twitter.com/danijarh/status/1613161946223677441
+- `dreamerv3/market/data.py`
+- `dreamerv3/market/prepare_data.py`
+- `dreamerv3/market/prepare_universe.py`
+- `dreamerv3/market/download_universe.py`
+- `dreamerv3/market/train_ensemble.py`
+- `dreamerv3/market/eval_ensemble.py`
+- `dreamerv3/market/sweep_thresholds.py`
+- `dreamerv3/market/inference.py`
+- `embodied/envs/market.py`
