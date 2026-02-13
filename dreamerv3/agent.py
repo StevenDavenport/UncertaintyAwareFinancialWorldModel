@@ -71,8 +71,7 @@ class Agent(embodied.jax.Agent):
     self.valnorm = embodied.jax.Normalize(**config.valnorm, name='valnorm')
     self.advnorm = embodied.jax.Normalize(**config.advnorm, name='advnorm')
 
-    self.modules = [
-        self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
+    self.modules = [self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
     self.opt = embodied.jax.Optimizer(
         self.modules, self._make_opt(**config.opt), summary_depth=1,
         name='opt')
@@ -80,6 +79,10 @@ class Agent(embodied.jax.Agent):
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
     scales.update({k: rec for k in dec_space})
+    if not self.config.use_reward_loss:
+      scales.pop('rew', None)
+    if not self.config.repval_loss:
+      scales.pop('repval', None)
     self.scales = scales
 
   @property
@@ -122,9 +125,10 @@ class Agent(embodied.jax.Agent):
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    policy = self.pol(self.feat2tensor(feat), bdims=1)
-    act = sample(policy)
+    act = self._policy_action(feat)
     out = {}
+    if mode == 'mc_eval' or (mode == 'eval' and self.config.mc_eval.enabled):
+      out.update(prefix(self._posterior_mc_stats(feat), 'mc'))
     out['finite'] = elements.tree.flatdict(jax.tree.map(
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
@@ -133,6 +137,49 @@ class Agent(embodied.jax.Agent):
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
     return carry, act, out
+
+  def _zero_action(self, batch_size):
+    zeros = {}
+    for name, space in self.act_space.items():
+      zeros[name] = jnp.zeros((batch_size, *space.shape), space.dtype)
+    return zeros
+
+  def _policy_action(self, feat):
+    if self.config.zero_actions:
+      return self._zero_action(feat['deter'].shape[0])
+    return sample(self.pol(self.feat2tensor(feat), bdims=1))
+
+  def _posterior_mc_stats(self, feat):
+    cfg = self.config.mc_eval
+    horizon = int(cfg.horizon)
+    samples = int(cfg.samples)
+    epsilon = f32(cfg.epsilon)
+    target = cfg.target
+    B = feat['deter'].shape[0]
+
+    post = self.dyn._dist(feat['logit'])
+    stoch = post.sample(nj.seed(), shape=(samples,))
+    deter = jnp.repeat(feat['deter'][None], samples, axis=0)
+    carry = dict(
+        deter=deter.reshape((samples * B, deter.shape[-1])),
+        stoch=stoch.reshape((samples * B, *stoch.shape[2:])))
+
+    zero_policy = lambda x: self._zero_action(x['deter'].shape[0])
+    _, imgfeat, _ = self.dyn.imagine(carry, zero_policy, horizon, training=False)
+    reset = jnp.zeros((samples * B, horizon), bool)
+    _, _, recons = self.dec({}, imgfeat, reset, training=False)
+    if target in recons:
+      seq = recons[target].pred()
+    else:
+      seq = self.rew(self.feat2tensor(imgfeat), 2).pred()[..., None]
+
+    seq = seq.reshape((samples * B, horizon, -1))[..., 0]
+    delta = seq.sum(1).reshape((samples, B)).transpose((1, 0))
+    assert delta.shape == (B, samples), (delta.shape, (B, samples))
+    p_hat = (delta > epsilon).mean(-1)
+    var_hat = delta.var(-1)
+    mean_hat = delta.mean(-1)
+    return {'p_hat': p_hat, 'var_hat': var_hat, 'mean_hat': mean_hat}
 
   def train(self, carry, data):
     carry, obs, prevact, stepid = self._apply_replay_context(carry, data)
@@ -170,7 +217,8 @@ class Agent(embodied.jax.Agent):
     dec_carry, dec_entries, recons = self.dec(
         dec_carry, repfeat, reset, training)
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
-    losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
+    if self.config.use_reward_loss:
+      losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
     con = f32(~obs['is_terminal'])
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
@@ -189,7 +237,7 @@ class Agent(embodied.jax.Agent):
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
     starts = self.dyn.starts(dyn_entries, dyn_carry, K)
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    policyfn = self._policy_action
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
