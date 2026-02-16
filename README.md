@@ -23,6 +23,8 @@ Implemented:
 - Evaluation suite with metrics, CSV/JSON artefacts, and sanity plot
 - Threshold sweep utility
 - Universe downloader utility (Yahoo Finance, 5m/60d)
+- Interactive frontend for threshold/target experimentation
+- Plotly candlestick trade-review dashboard (zoom/pan + signal/trade overlays)
 
 ## Architecture
 
@@ -51,29 +53,37 @@ Feature vector:
 5. rolling realized volatility
 6. rolling log-volume z-score
 
-## Preliminary Results (as of February 13, 2026)
+## Preliminary Results (as of February 16, 2026)
 
-These are early prototype results and not leak-proof production benchmarks.
+These are still prototype results, but now reflect the latest leakage-corrected run protocol:
+- tune on `val`
+- report once on locked `test`
 
-Single-ticker run (`QQQ`, tiny model, 3-seed ensemble), test-tuned gate:
+Setup used for latest report:
+- dataset: multi-ticker universe (`101` tickers; episodes `train=1010`, `val=404`, `test=202`)
+- ensemble: `3` seeds (`market_tiny`)
+- evaluation: `horizon=4` bars (20 minutes), `samples=32`
+- signal mode: `long_only`
+- gate thresholds: `p_min=0.65`, `disagree_max=0.08`, `var_max=0.20`
 
-- precision: `61.5%`
-- coverage: `5.3%`
-- recall: `8.1%`
+Validation (`iter1_val_longonly`, used for tuning):
+- precision: `48.73%`
+- coverage: `0.232%`
+- recall: `0.226%`
+- executed trades: `208`
+- portfolio return: `+1.99%`
+- max drawdown: `1.98%`
 
-Leakage-corrected protocol (`val` tune -> locked `test`) showed overfit:
+Locked test (`iter1_test_longonly`, Feb 2, 2026 to Feb 10, 2026; 7 trading days):
+- precision: `52.85%`
+- coverage: `0.242%`
+- recall: `0.247%`
+- greens: `123` (executed trades: `117`)
+- portfolio return: `+11.11%`
+- max drawdown: `1.61%`
+- portfolio profit factor: `2.27`
 
-- locked test precision dropped near base rate (~`40%`)
-
-Universe run (subset eval for fast sweep on CPU):
-
-- dataset: `101` tickers
-- episodes: `train=1010`, `val=404`, `test=202`
-- quick eval (3 seeds, `samples=8`, `max_episodes=30`):
-  - baseline gate precision: `46.3%`, coverage: `21.0%`
-  - best precision-first sweep point: `53.0%` precision at `1.13%` coverage
-
-Takeaway: gating behavior works; coverage/precision tradeoff is controllable; more data depth is still needed.
+Takeaway: uncertainty gating is producing selective high-precision signals at very low coverage; next priority is robustness testing (walk-forward / longer history), not threshold over-optimization.
 
 ## Quickstart
 
@@ -151,6 +161,43 @@ python -m dreamerv3.market.sweep_thresholds \
   --min_coverage 0.01
 ```
 
+### 6) Launch interactive frontend
+
+Build a bundle from eval outputs:
+
+```bash
+python -m dreamerv3.market.build_frontend_bundle \
+  --eval_dirs \
+    h12_val=~/logdir/finwm/universe_tiny/eval_h12_val \
+    h12_test=~/logdir/finwm/universe_tiny/eval_h12_test \
+  --out_json frontend/data/bundle.json
+```
+
+Run full frontend server (includes experiment runner API):
+
+```bash
+python -m dreamerv3.market.experiment_server \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --repo_root . \
+  --market_data_dir data \
+  --market_csv_pattern '{ticker}_5m.csv'
+```
+
+Then open: `http://localhost:8000`
+
+Frontend supports:
+
+- live tuning of `p_min`, `disagree_max`, `var_max`
+- live tuning of `epsilon` and `cost_buffer`
+- per-ticker candlestick chart with zoom/pan
+- live signal overlays + executed trade markers
+- trade ledger for manual review
+- reliability curve and uncertainty scatter
+- loading either a bundle JSON or raw `predictions.csv`
+- launching eval/sweep/bundle/train jobs from the browser
+- monitoring run status and log tail
+
 ## Important Notes
 
 - Yahoo Finance 5-minute history is limited to the most recent ~60 days.
@@ -168,5 +215,9 @@ python -m dreamerv3.market.sweep_thresholds \
 - `dreamerv3/market/train_ensemble.py`
 - `dreamerv3/market/eval_ensemble.py`
 - `dreamerv3/market/sweep_thresholds.py`
+- `dreamerv3/market/build_frontend_bundle.py`
+- `dreamerv3/market/experiment_server.py`
 - `dreamerv3/market/inference.py`
 - `embodied/envs/market.py`
+- `frontend/index.html`
+- `frontend/app.js`

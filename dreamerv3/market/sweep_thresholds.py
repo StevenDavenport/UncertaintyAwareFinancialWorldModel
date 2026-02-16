@@ -7,7 +7,11 @@ from pathlib import Path
 
 import numpy as np
 
-from dreamerv3.market.inference import compute_gate_metrics
+from dreamerv3.market.inference import (
+    apply_directional_gate,
+    compute_directional_gate_metrics,
+    compute_gate_metrics,
+)
 
 
 def parse_list(text: str, cast=float) -> list:
@@ -25,6 +29,7 @@ def load_predictions(path: str) -> dict[str, np.ndarray]:
   rows = []
   with open(path, 'r', newline='') as f:
     reader = csv.DictReader(f)
+    fieldnames = set(reader.fieldnames or ())
     for row in reader:
       rows.append(row)
   if not rows:
@@ -34,31 +39,68 @@ def load_predictions(path: str) -> dict[str, np.ndarray]:
     return np.asarray([cast(r[name]) for r in rows])
 
   y = np.asarray([bool(int(r['y'])) for r in rows])
-  return {
+  out = {
       'y': y,
       'p_mean': col('p_mean', float),
       'disagree': col('disagree', float),
       'var_mean': col('var_mean', float),
   }
+  if {'y_up', 'y_down', 'p_up_mean', 'p_down_mean', 'disagree_up', 'disagree_down'} <= fieldnames:
+    out.update({
+        'y_up': np.asarray([bool(int(r['y_up'])) for r in rows]),
+        'y_down': np.asarray([bool(int(r['y_down'])) for r in rows]),
+        'p_up_mean': col('p_up_mean', float),
+        'p_down_mean': col('p_down_mean', float),
+        'disagree_up': col('disagree_up', float),
+        'disagree_down': col('disagree_down', float),
+    })
+  return out
 
 
-def sweep(data, p_vals, d_vals, v_vals):
+def sweep(data, p_vals, d_vals, v_vals, signal_mode: str):
   results = []
   y = data['y']
+  v = data['var_mean']
+  directional_ready = (
+      signal_mode == 'directional' and
+      all(k in data for k in ('y_up', 'y_down', 'p_up_mean', 'p_down_mean', 'disagree_up', 'disagree_down'))
+  )
   p = data['p_mean']
   d = data['disagree']
-  v = data['var_mean']
   for p_min in p_vals:
     for d_max in d_vals:
       for v_max in v_vals:
-        green = (p >= p_min) & (d <= d_max) & (v <= v_max)
-        mets = compute_gate_metrics(y, green)
-        results.append({
-            'p_min': float(p_min),
-            'disagree_max': float(d_max),
-            'var_max': float(v_max),
-            **mets,
-        })
+        if directional_ready:
+          gate = apply_directional_gate(
+              data['p_up_mean'],
+              data['p_down_mean'],
+              data['disagree_up'],
+              data['disagree_down'],
+              v,
+              p_min=float(p_min),
+              disagree_max=float(d_max),
+              var_max=float(v_max),
+          )
+          mets = compute_directional_gate_metrics(
+              data['y_up'], data['y_down'], gate['long'], gate['short'])
+          row = {
+              'signal_mode': 'directional',
+              'p_min': float(p_min),
+              'disagree_max': float(d_max),
+              'var_max': float(v_max),
+              **mets,
+          }
+        else:
+          green = (p >= p_min) & (d <= d_max) & (v <= v_max)
+          mets = compute_gate_metrics(y, green)
+          row = {
+              'signal_mode': 'long_only',
+              'p_min': float(p_min),
+              'disagree_max': float(d_max),
+              'var_max': float(v_max),
+              **mets,
+          }
+        results.append(row)
   return results
 
 
@@ -113,6 +155,7 @@ def parse_args():
   p.add_argument('--p_values', default='0.50,0.55,0.60,0.65,0.70')
   p.add_argument('--disagree_values', default='0.05,0.08,0.10,0.15,0.20,0.30')
   p.add_argument('--var_values', default='0.0004,0.001,0.003,0.01,0.03')
+  p.add_argument('--signal_mode', default='auto', choices=['auto', 'directional', 'long_only'])
   p.add_argument('--min_coverage', type=float, default=0.01)
   p.add_argument('--topk', type=int, default=25)
   return p.parse_args()
@@ -128,7 +171,12 @@ def main():
   d_vals = parse_list(args.disagree_values, float)
   v_vals = parse_list(args.var_values, float)
 
-  all_rows = sweep(data, p_vals, d_vals, v_vals)
+  if args.signal_mode == 'auto':
+    signal_mode = 'directional' if 'p_up_mean' in data else 'long_only'
+  else:
+    signal_mode = args.signal_mode
+
+  all_rows = sweep(data, p_vals, d_vals, v_vals, signal_mode=signal_mode)
   ranked = rank_results(all_rows, min_coverage=args.min_coverage)
 
   save_csv(outdir / 'sweep_all.csv', all_rows)
@@ -138,6 +186,7 @@ def main():
   summary = {
       'num_candidates': len(all_rows),
       'num_ranked': len(ranked),
+      'signal_mode': signal_mode,
       'min_coverage': args.min_coverage,
       'top': ranked[: min(args.topk, len(ranked))],
   }

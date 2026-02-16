@@ -206,6 +206,42 @@ def load_split_npz(dataset_dir: str, split: str) -> dict[str, np.ndarray]:
     return {k: data[k] for k in data.files}
 
 
+def infer_split_instrument_ids(
+    dataset_dir: str,
+    split: str,
+    episodes: int,
+) -> tuple[np.ndarray, dict[int, str]] | tuple[None, None]:
+  path = Path(dataset_dir) / 'meta.json'
+  if not path.exists():
+    return None, None
+  try:
+    meta = json.loads(path.read_text())
+  except Exception:
+    return None, None
+
+  per_instrument = meta.get('per_instrument')
+  if not isinstance(per_instrument, dict) or not per_instrument:
+    return None, None
+
+  ids: list[int] = []
+  names: dict[int, str] = {}
+  inst_id = 0
+  for inst, info in per_instrument.items():
+    try:
+      cnt = int(info['splits'][split]['episodes'])
+    except Exception:
+      cnt = 0
+    if cnt <= 0:
+      continue
+    names[inst_id] = str(inst)
+    ids.extend([inst_id] * cnt)
+    inst_id += 1
+
+  if len(ids) != episodes:
+    return None, None
+  return np.asarray(ids, np.int64), names
+
+
 def prepare_market_dataset(
     input_csv: str,
     outdir: str,

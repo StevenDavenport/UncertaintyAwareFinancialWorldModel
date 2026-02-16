@@ -19,9 +19,10 @@ This is not a trading policy. It is an evaluation framework for confidence-gated
 - Agent support for:
   - forced zero actions
   - optional reward loss disable (`use_reward_loss`)
-  - posterior MC rollout stats during policy pass (`mc/p_hat`, `mc/var_hat`)
+  - posterior MC rollout stats during policy pass (`mc/p_up`, `mc/p_down`, `mc/var_hat`, `mc/mean_hat`)
 - Ensemble launcher for multi-seed training
-- Ensemble evaluation script with abstention gate metrics and saved artifacts
+- Ensemble evaluation script with directional abstention gate metrics and fixed-horizon trade simulation metrics
+- Frontend bundle builder for interactive dashboard workflows
 - Lightweight correctness tests (shape checks, determinism, causal label construction, ensemble aggregation)
 
 ## Key Files
@@ -34,6 +35,7 @@ This is not a trading policy. It is an evaluation framework for confidence-gated
 - `dreamerv3/market/inference.py`: ensemble aggregation, gating, metrics, artifact writing
 - `dreamerv3/market/train_ensemble.py`: multi-seed launcher
 - `dreamerv3/market/eval_ensemble.py`: evaluation entrypoint
+- `dreamerv3/market/build_frontend_bundle.py`: bundle eval outputs for frontend
 - `dreamerv3/tests/test_market_inference.py`: lightweight tests
 
 ## Dataset Format
@@ -139,26 +141,58 @@ python -m dreamerv3.market.eval_ensemble \
   --samples 64 \
   --epsilon 0.0005 \
   --cost_buffer 0.0002 \
+  --signal_mode directional \
   --p_min 0.70 \
   --disagree_max 0.08 \
   --var_max 0.0004 \
+  --stop_mult 2.0 \
+  --min_stop 0.0005 \
+  --bt_initial_capital 1.0 \
+  --bt_risk_fraction 0.01 \
+  --bt_max_positions 20 \
+  --bt_max_gross_leverage 3.0 \
+  --bt_one_position_per_asset 1 \
   --outdir ~/logdir/finwm/qqq/eval_h12
 ```
+
+### 5) Build and launch frontend
+
+```bash
+python -m dreamerv3.market.build_frontend_bundle \
+  --eval_dirs \
+    h12=~/logdir/finwm/qqq/eval_h12 \
+  --out_json frontend/data/bundle.json
+
+python -m dreamerv3.market.experiment_server \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --repo_root .
+```
+
+Open `http://localhost:8000`.
 
 ## Evaluation Outputs
 
 The evaluation script writes:
-- `metrics.json`: precision/recall/coverage/abstain/false-green and settings
-- `predictions.csv`: per-timestep predictions and gate decisions
+- `metrics.json`: directional gate metrics, trade metrics, and settings
+- `predictions.csv`: per-timestep predictions, directional signal, and trade outcomes
+- `backtest_trades.csv`: executed portfolio trades with position size and PnL
+- `backtest_equity.csv`: equity curve and open exposure over time
 - `calibration.csv`: reliability-bin table
 - `sanity.png`: reliability + short timeline plot
 
 ## Gate Definition
 
-Green signal is true only if all conditions hold:
-- `p_mean >= p_min`
-- `disagree <= disagree_max`
-- `var_mean <= var_max`
+Directional signal (`signal_mode=directional`):
+- Long green if:
+  - `p_up_mean >= p_min`
+  - `disagree_up <= disagree_max`
+  - `var_mean <= var_max`
+- Short green if:
+  - `p_down_mean >= p_min`
+  - `disagree_down <= disagree_max`
+  - `var_mean <= var_max`
+- If both pass, choose side with higher probability (`p_up_mean` vs `p_down_mean`).
 
 Else: abstain.
 
@@ -166,7 +200,26 @@ Else: abstain.
 
 For each timestep `t` on the test split:
 - compute strictly causal future return over horizon `H`: sum of returns on `(t+1 .. t+H)`
-- label `y(t)=1` if future return exceeds `epsilon + cost_buffer`
+- label `y_up(t)=1` if future return exceeds `epsilon + cost_buffer`
+- label `y_down(t)=1` if future return is below `-(epsilon + cost_buffer)`
+
+## Fixed Trade Evaluation
+
+The evaluator includes a fixed policy simulator:
+- Entry on green signal at `t`
+- Exit at first stop-loss hit or at horizon close
+- Stop distance: `max(min_stop, stop_mult * feat[..., realized_vol])`
+- Net return applies `trade_cost` (defaults to `2 * cost_buffer` if not set)
+- Reports include: total return, win rate, stop-hit rate, profit factor, and max drawdown.
+
+## Portfolio Backtest (Capital-Aware)
+
+The evaluator also includes a capital-aware backtest layer:
+- Position size is risk-based: `notional = (equity * bt_risk_fraction) / stop_dist`
+- Leverage cap: `open_notional <= bt_max_gross_leverage * equity`
+- Concurrency cap: at most `bt_max_positions` open positions
+- Optional one-position-per-asset lock (`bt_one_position_per_asset=1`)
+- Equity is updated on exits and written to `backtest_equity.csv`
 
 ## Tests
 

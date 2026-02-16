@@ -176,10 +176,18 @@ class Agent(embodied.jax.Agent):
     seq = seq.reshape((samples * B, horizon, -1))[..., 0]
     delta = seq.sum(1).reshape((samples, B)).transpose((1, 0))
     assert delta.shape == (B, samples), (delta.shape, (B, samples))
-    p_hat = (delta > epsilon).mean(-1)
+    p_up = (delta > epsilon).mean(-1)
+    p_down = (delta < -epsilon).mean(-1)
     var_hat = delta.var(-1)
     mean_hat = delta.mean(-1)
-    return {'p_hat': p_hat, 'var_hat': var_hat, 'mean_hat': mean_hat}
+    # Keep p_hat as an alias for backward compatibility with long-only codepaths.
+    return {
+        'p_hat': p_up,
+        'p_up': p_up,
+        'p_down': p_down,
+        'var_hat': var_hat,
+        'mean_hat': mean_hat,
+    }
 
   def train(self, carry, data):
     carry, obs, prevact, stepid = self._apply_replay_context(carry, data)

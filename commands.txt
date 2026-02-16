@@ -103,3 +103,108 @@ python -m dreamerv3.market.train_ensemble \
   --env.market.dataset_dir data/market/universe_5m \
   --jax.platform cpu \
   --jax.prealloc False
+
+# Build frontend bundle from one or more eval outputs
+python -m dreamerv3.market.build_frontend_bundle \
+  --eval_dirs \
+    h12_val=~/logdir/finwm/universe_tiny/eval_h12_val \
+    h12_test=~/logdir/finwm/universe_tiny/eval_h12_test \
+  --out_json frontend/data/bundle.json
+
+# Serve the frontend locally
+python -m http.server 8000 --directory frontend
+
+# Build frontend bundle (single quick run example)
+python -m dreamerv3.market.build_frontend_bundle \
+  --eval_dirs h12_quick=~/logdir/finwm/universe_tiny/eval_h12_test_quick30 \
+  --out_json frontend/data/bundle.json
+
+# Serve the frontend locally
+python -m http.server 8000 --directory frontend
+
+# Serve frontend + experiment runner API (recommended)
+python -m dreamerv3.market.experiment_server \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --repo_root . \
+  --market_data_dir data \
+  --market_csv_pattern '{ticker}_5m.csv'
+
+# Evaluate directional long/short gate + fixed-horizon trade metrics (recommended baseline)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/universe_tiny/seed_0 ~/logdir/finwm/universe_tiny/seed_1 ~/logdir/finwm/universe_tiny/seed_2 ~/logdir/finwm/universe_tiny/seed_3 ~/logdir/finwm/universe_tiny/seed_4 \
+  --dataset_dir data/market/universe_5m \
+  --split test \
+  --horizon 4 \
+  --samples 64 \
+  --epsilon 0.0005 \
+  --cost_buffer 0.0002 \
+  --signal_mode directional \
+  --p_min 0.60 \
+  --disagree_max 0.12 \
+  --var_max 0.30 \
+  --stop_mult 2.0 \
+  --min_stop 0.0005 \
+  --outdir ~/logdir/finwm/universe_tiny/eval_h4_directional
+
+# Evaluate with capital-aware portfolio backtest (backend v1)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/universe_tiny/seed_0 ~/logdir/finwm/universe_tiny/seed_1 ~/logdir/finwm/universe_tiny/seed_2 ~/logdir/finwm/universe_tiny/seed_3 ~/logdir/finwm/universe_tiny/seed_4 \
+  --dataset_dir data/market/universe_5m \
+  --split test \
+  --horizon 4 \
+  --samples 64 \
+  --epsilon 0.0005 \
+  --cost_buffer 0.0002 \
+  --signal_mode directional \
+  --p_min 0.60 \
+  --disagree_max 0.12 \
+  --var_max 0.30 \
+  --stop_mult 2.0 \
+  --min_stop 0.0005 \
+  --bt_initial_capital 1.0 \
+  --bt_risk_fraction 0.01 \
+  --bt_max_positions 20 \
+  --bt_max_gross_leverage 3.0 \
+  --bt_one_position_per_asset 1 \
+  --outdir ~/logdir/finwm/universe_tiny/eval_h4_directional_bt
+
+# Next iteration starter (val split, long-only, lower leverage pressure)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/universe_tiny/seed_0 ~/logdir/finwm/universe_tiny/seed_1 ~/logdir/finwm/universe_tiny/seed_2 \
+  --dataset_dir data/market/universe_5m \
+  --split val \
+  --horizon 4 \
+  --samples 32 \
+  --signal_mode long_only \
+  --p_min 0.65 \
+  --disagree_max 0.08 \
+  --var_max 0.20 \
+  --stop_mult 3.0 \
+  --min_stop 0.001 \
+  --bt_initial_capital 1.0 \
+  --bt_risk_fraction 0.003 \
+  --bt_max_positions 20 \
+  --bt_max_gross_leverage 2.5 \
+  --bt_one_position_per_asset 1 \
+  --outdir ~/logdir/finwm/universe_tiny/iter1_val_longonly
+
+# Same settings on test split (frozen from val)
+python -m dreamerv3.market.eval_ensemble \
+  --logdirs ~/logdir/finwm/universe_tiny/seed_0 ~/logdir/finwm/universe_tiny/seed_1 ~/logdir/finwm/universe_tiny/seed_2 \
+  --dataset_dir data/market/universe_5m \
+  --split test \
+  --horizon 4 \
+  --samples 32 \
+  --signal_mode long_only \
+  --p_min 0.65 \
+  --disagree_max 0.08 \
+  --var_max 0.20 \
+  --stop_mult 3.0 \
+  --min_stop 0.001 \
+  --bt_initial_capital 1.0 \
+  --bt_risk_fraction 0.003 \
+  --bt_max_positions 20 \
+  --bt_max_gross_leverage 2.5 \
+  --bt_one_position_per_asset 1 \
+  --outdir ~/logdir/finwm/universe_tiny/iter1_test_longonly
